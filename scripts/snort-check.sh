@@ -19,6 +19,14 @@
 #     - `snort-mgr check` WITHOUT -v skips the rules entirely and passes even
 #       with a broken rule in place. Only `-v` loads /etc/snort/rules/*.rules.
 #
+#     - with snort.snort.manual=1 (the package default), `snort-mgr check`
+#       returns 0 before running Snort at all. manual must read 0 after step 1.
+#     - an empty rules file validates clean, because Snort still loads the
+#       image's own built-in rules. The candidate must hold active rules.
+#     These three no-op paths are the same ones
+#     rasputin-openwrt-firewall's scripts/rasputin-snort-rules-check.sh fails
+#     on; the two checks must stay in step (see README.md).
+#
 #  3. Runs the check twice: once with an EMPTY community rules file (the
 #     baseline: rules the image loads from elsewhere, e.g. file_magic.rules) and
 #     once with RULES_FILE. It then requires
@@ -89,6 +97,9 @@ mount_into "$root/dev" --bind /dev
 mount_into "$root/tmp" -t tmpfs tmpfs
 
 chroot "$root" /sbin/uci -q batch <"$logs/uci-batch" || die "uci batch failed inside the firewall root"
+manual="$(chroot "$root" /sbin/uci -q get snort.snort.manual || true)"
+[ "$manual" = "0" ] ||
+	die "check 4 FAILED: snort.snort.manual is '$manual' after applying the image's 99-rasputin; with manual != 0 'snort-mgr check' returns 0 without running Snort, so nothing would be checked"
 echo "applied $(wc -l <<<"$uci_lines" | tr -d ' ') Snort UCI settings from the image's 99-rasputin" >&2
 
 snort_version="$(chroot "$root" /usr/bin/snort -V 2>&1 | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p' | head -n 1)"
@@ -116,15 +127,21 @@ show_errors() {
 
 : >"$target"
 read -r base_rc base_loaded < <(run_check baseline)
-if [ "$base_rc" -ne 0 ] || [ "$base_loaded" = "none" ]; then
+if [ "$base_rc" -ne 0 ]; then
 	show_errors baseline
 	die "the firewall root failed snort-mgr -v check with NO community rules (exit $base_rc); the harness is broken, not the rules"
+fi
+if [ "$base_loaded" = "none" ]; then
+	tail -n 20 -- "$logs/baseline.log" >&2
+	die "check 4 FAILED: snort-mgr check exited 0 without loading any rules, so nothing was checked (run without -v, or Snort never ran)"
 fi
 
 # --- 3. Candidate --------------------------------------------------------------
 
 install -m 0644 -- "$rules" "$target"
 expected="$(count_active_rules "$target")"
+[ "$expected" -gt 0 ] ||
+	die "check 4 FAILED: $rules has no active rules; an empty ruleset validates clean (Snort still loads the image's built-in rules), so it fails here"
 read -r cand_rc cand_loaded < <(run_check candidate)
 
 if [ "$cand_rc" -ne 0 ]; then

@@ -33,7 +33,15 @@ mkdir -p -- "$scratch"
 trap 'rm -rf -- "$scratch"' EXIT
 
 echo "decompressing $image_gz" >&2
-gunzip -c -- "$image_gz" >"$scratch/disk.img" || die "gunzip failed on $image_gz"
+# OpenWrt images can carry trailing padding after the gzip stream, which makes
+# gunzip exit 2 ("trailing garbage ignored") after decompressing correctly.
+# Tolerated, as in rasputin-openwrt-firewall's release.yml and rules check;
+# any other non-zero exit is a real failure.
+gunzip_rc=0
+gunzip -c -- "$image_gz" >"$scratch/disk.img" || gunzip_rc=$?
+if [ "$gunzip_rc" -ne 0 ] && [ "$gunzip_rc" -ne 2 ]; then
+	die "gunzip exited $gunzip_rc on $image_gz"
+fi
 
 table="$(sfdisk -J "$scratch/disk.img")" || die "sfdisk could not read a partition table from the image"
 sector="$(jq -er '.partitiontable.sectorsize // 512' <<<"$table")"

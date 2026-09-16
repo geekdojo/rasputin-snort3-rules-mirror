@@ -99,10 +99,10 @@ failed=0
 failures=()
 
 check_case() {
-	# check_case NAME EXPECT(pass|fail) PATTERN RULES_FILE
-	local name="$1" expect="$2" pattern="$3" file="$4" rc=0 ok=1
+	# check_case NAME EXPECT(pass|fail) PATTERN RULES_FILE [CHECK_SCRIPT]
+	local name="$1" expect="$2" pattern="$3" file="$4" script="${5:-$SCRIPTS/snort-check.sh}" rc=0 ok=1
 	local out="$W/case.out"
-	as_root "$SCRIPTS/snort-check.sh" "$root" "$file" >"$out" 2>&1 || rc=$?
+	as_root "$script" "$root" "$file" >"$out" 2>&1 || rc=$?
 	if [ "$expect" = "pass" ] && [ "$rc" -ne 0 ]; then ok=0; fi
 	if [ "$expect" = "fail" ] && [ "$rc" -eq 0 ]; then ok=0; fi
 	if ! grep -qF -- "$pattern" "$out"; then ok=0; fi
@@ -129,6 +129,43 @@ check_case "broken: Snort 2 era keyword placement (the ET Open failure) fails" f
 check_case "broken: an undefined variable fails" fail "check 4 FAILED: snort-mgr -v check rejected" "$rules/small-undefined-variable.rules"
 check_case "broken: an invalid pcre fails" fail "check 4 FAILED: snort-mgr -v check rejected" "$rules/small-bad-pcre.rules"
 check_case "broken: a rule Snort silently drops (duplicate sid) fails the loaded-count check" fail "check 4 FAILED: Snort loaded 3 rules" "$rules/small-duplicate-sid.rules"
+
+# --- Ways snort-mgr exits 0 WITHOUT checking the rules ----------------------------
+#
+# Each of these makes `snort-mgr ... check` succeed while proving nothing. The
+# check must fail on every one, even though the rules themselves are fine.
+
+# 1. Run without -v: snort-mgr generates a config with no rules at all. Proven on
+#    a copy of snort-check.sh with only the -v removed; the grep guards make sure
+#    the copy really differs, so this case cannot silently test the original.
+mutant="$W/mutant-no-v/scripts"
+mkdir -p -- "$mutant"
+cp -- "$SCRIPTS/lib.sh" "$mutant/lib.sh"
+sed 's|/usr/bin/snort-mgr -v check|/usr/bin/snort-mgr check|' "$SCRIPTS/snort-check.sh" >"$mutant/snort-check.sh"
+chmod +x "$mutant/snort-check.sh"
+[ "$(grep -c 'snort-mgr -v check' "$SCRIPTS/snort-check.sh")" -ge 1 ] || die "snort-check.sh no longer runs 'snort-mgr -v check'; update this test"
+! grep -q '/usr/bin/snort-mgr -v check' "$mutant/snort-check.sh" || die "the no -v mutant still runs -v"
+check_case "no-op: snort-mgr check WITHOUT -v fails (good rules)" fail "check 4 FAILED" "$rules/small-good.rules" "$mutant/snort-check.sh"
+
+# 2. snort.snort.manual=1 (the package default): check returns 0 before running
+#    Snort. Simulated by flipping the image's own 99-rasputin, then restored.
+uci_defaults="$root/etc/uci-defaults/99-rasputin"
+as_root cp -- "$uci_defaults" "$W/99-rasputin.orig"
+as_root sed -i "s/^set snort\.snort\.manual='0'\$/set snort.snort.manual='1'/" "$uci_defaults"
+as_root grep -qx "set snort.snort.manual='1'" "$uci_defaults" || die "could not set manual='1' in the image's 99-rasputin; update this test"
+check_case "no-op: snort.snort.manual=1 fails (good rules)" fail "check 4 FAILED" "$rules/small-good.rules"
+as_root cp -- "$W/99-rasputin.orig" "$uci_defaults"
+as_root grep -qx "set snort.snort.manual='0'" "$uci_defaults" || die "could not restore the image's 99-rasputin"
+
+# 3. An empty ruleset validates clean: Snort still loads the image's own 219
+#    built-in rules. Also a file whose only rules are commented out.
+: >"$rules/empty.rules"
+printf '# alert tcp any any -> any 80 ( msg:"RASPUTIN TEST disabled"; sid:9000201; rev:1; )\n' >"$rules/only-comments.rules"
+check_case "no-op: an empty rules file fails" fail "check 4 FAILED" "$rules/empty.rules"
+check_case "no-op: a rules file with only commented-out rules fails" fail "check 4 FAILED" "$rules/only-comments.rules"
+
+# After the no-op cases, good rules must still pass (the restore worked).
+check_case "good: the shipped ruleset still loads after the no-op cases" pass "loaded all $shipped_count rules" "$rules/shipped.rules"
 
 echo
 echo "functional tests: $passed passed, $failed failed"
