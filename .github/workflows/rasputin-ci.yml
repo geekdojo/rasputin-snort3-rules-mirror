@@ -1,0 +1,72 @@
+##
+## rasputin-ci.yml — tests for the mirror's verification code.
+##
+## WHY IT EXISTS
+##   This repo decides which Snort rules a security appliance ships. The checks in
+##   scripts/ are hand-rolled, so they get two kinds of tests on every pull request:
+##   - unit tests (tests/unit.sh): the layout, count, SHA and publish logic against
+##     fixture tarballs and fake curl/gh, including every negative case;
+##   - a functional test (tests/functional-snort.sh): the real Snort in the latest
+##     stable Rasputin firewall image must accept good rules and reject broken ones.
+##   The dry-run job in rasputin-refresh.yml additionally runs every check against
+##   the current upstream tarball.
+##
+## PERMISSIONS
+##   Read-only. Nothing here publishes; a pull request from a fork must not be able
+##   to acquire write scope.
+##
+name: rasputin-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rasputin-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Lint and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        timeout-minutes: 5
+        run: ./scripts/install-deps-ubuntu.sh
+
+      - name: shellcheck
+        timeout-minutes: 2
+        run: shellcheck -x scripts/*.sh tests/*.sh
+
+      - name: Unit tests
+        timeout-minutes: 5
+        run: ./tests/unit.sh
+
+  functional:
+    name: Functional test (real Snort in the firewall image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        timeout-minutes: 5
+        run: ./scripts/install-deps-ubuntu.sh
+
+      - name: Snort accepts good rules and rejects broken ones
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tests/functional-snort.sh "$RUNNER_TEMP/functional"
