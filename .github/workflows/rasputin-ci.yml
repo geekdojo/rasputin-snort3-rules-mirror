@@ -52,6 +52,10 @@ jobs:
         timeout-minutes: 5
         run: ./tests/unit.sh
 
+      - name: Release target guard tests
+        timeout-minutes: 5
+        run: ./tests/release-target-guard.test.sh
+
   functional:
     name: Functional test (real Snort in the firewall image)
     runs-on: ubuntu-24.04

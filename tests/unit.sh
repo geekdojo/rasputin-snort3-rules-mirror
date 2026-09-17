@@ -345,7 +345,20 @@ release)
 *) echo "fake gh: unexpected command $*" >&2; exit 99 ;;
 esac
 FAKE
-chmod +x "$FAKE_BIN/curl" "$FAKE_BIN/gh"
+# Fake release-target-guard: records its arguments, and answers with
+# FAKE_GUARD_PRE_RC before `release create` has run (default 3, tag absent) and
+# FAKE_GUARD_POST_RC after (default 0, tag on the built commit). The real guard
+# has its own tests (tests/release-target-guard.test.sh).
+cat >"$FAKE_BIN/release-target-guard" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'guard %s\n' "$*" >>"$FAKE_LOG"
+if [ -f "$FAKE_STATE/created" ]; then
+	exit "${FAKE_GUARD_POST_RC:-0}"
+fi
+exit "${FAKE_GUARD_PRE_RC:-3}"
+FAKE
+chmod +x "$FAKE_BIN/curl" "$FAKE_BIN/gh" "$FAKE_BIN/release-target-guard"
 
 # with_fakes VAR=VALUE... -- CMD... — run CMD with the fakes first on PATH and a
 # fresh log and state directory.
@@ -411,7 +424,9 @@ verified_workdir() {
 	printf '%s\n' "$one_sha" >"$dir/sha256"
 	printf 'sha256=%s\nactive_rules=4017\nfirewall_tag=2026.09.3\nsnort_version=3.10.0.0\nverified_at=2026-09-16T00:00:00Z\n' "$one_sha" >"$dir/verification.env"
 }
-pub() { with_fakes FAKE_SHA="$one_sha" FAKE_CURL_FILES="$d/one.tar.gz" "$@" -- "$SCRIPTS/publish.sh" "$d/pub"; }
+built_commit="0123456789abcdef0123456789abcdef01234567"
+pub_env=(TARGET_SHA="$built_commit" MIRROR_REMOTE="$T/no-remote.git" RELEASE_TARGET_GUARD="$FAKE_BIN/release-target-guard")
+pub() { with_fakes FAKE_SHA="$one_sha" FAKE_CURL_FILES="$d/one.tar.gz" "${pub_env[@]}" "$@" -- "$SCRIPTS/publish.sh" "$d/pub"; }
 
 verified_workdir "$d/pub"
 run_case "publish: DRY_RUN=1 on a new sha says what it would publish" pass "WOULD publish" \
@@ -428,10 +443,30 @@ run_case "publish: a new sha is published as sha256-<sha> with the tarball as it
 	pub FAKE_RELEASE=absent
 run_case "publish: gh release create got the contract tag, asset and repo" pass "" \
 	bash -c 'grep -qF -- "release create sha256-$2 $3/snort3-community-rules.tar.gz --repo example/test-mirror" "$1"' _ "$T/fake.log" "$one_sha" "$d/pub"
+run_case "publish: gh release create targets the built commit" pass "" \
+	bash -c 'grep -qF -- " --target $2 " "$1"' _ "$T/fake.log" "$built_commit"
+run_case "publish: the tag is checked before and after the release is created" pass "" \
+	bash -c '[ "$(sed -E "s/^(guard|release create).*/\1/;t;d" "$1" | paste -sd, -)" = "guard,release create,guard" ] && [ "$(grep -cxF -- "guard $2 sha256-$3 $4" "$1")" = 2 ]' _ "$T/fake.log" "$T/no-remote.git" "$one_sha" "$built_commit"
+run_case "publish: a real publish without TARGET_SHA is refused" fail "TARGET_SHA must be the full commit SHA" \
+	pub FAKE_RELEASE=absent TARGET_SHA=
+run_case "publish: without TARGET_SHA nothing is created" pass "" \
+	bash -c '! grep -q "^release create" "$1"' _ "$T/fake.log"
+run_case "publish: DRY_RUN=1 needs no TARGET_SHA" pass "WOULD publish" \
+	pub DRY_RUN=1 FAKE_RELEASE=absent TARGET_SHA=
+run_case "publish: a tag already on another commit is refused" fail "refusing to publish sha256-$one_sha: release-target-guard status 1" \
+	pub FAKE_RELEASE=absent FAKE_GUARD_PRE_RC=1
+run_case "publish: a tag on another commit stops before the release is created" pass "" \
+	bash -c '! grep -q "^release create" "$1"' _ "$T/fake.log"
+run_case "publish: an unreadable remote is refused, not read as absent" fail "release-target-guard status 2" \
+	pub FAKE_RELEASE=absent FAKE_GUARD_PRE_RC=2
+run_case "publish: a tag that lands on another commit fails" fail "is not on the built commit $built_commit" \
+	pub FAKE_RELEASE=absent FAKE_GUARD_POST_RC=1
+run_case "publish: a tag on the wrong commit is never deleted" pass "" \
+	bash -c 'grep -q "^release create" "$1" && ! grep -q "^release delete" "$1"' _ "$T/fake.log"
 run_case "publish: a release that does not verify after creation fails" fail "does not verify as intact" \
 	pub FAKE_RELEASE=absent FAKE_AFTER_CREATE=baddigest
 run_case "publish: a download URL serving other bytes fails" fail "serves $(sha256sum "$d/two.tar.gz" | cut -d' ' -f1)" \
-	with_fakes FAKE_SHA="$one_sha" FAKE_CURL_FILES="$d/two.tar.gz" FAKE_RELEASE=absent -- "$SCRIPTS/publish.sh" "$d/pub"
+	with_fakes FAKE_SHA="$one_sha" FAKE_CURL_FILES="$d/two.tar.gz" FAKE_RELEASE=absent "${pub_env[@]}" -- "$SCRIPTS/publish.sh" "$d/pub"
 run_case "publish: a failing gh release create fails" fail "gh release create sha256-$one_sha failed" \
 	pub FAKE_RELEASE=absent FAKE_CREATE_RC=1
 
