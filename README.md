@@ -312,6 +312,13 @@ defaults that customers actually run.
   tag. Anything else, including an API error or a bare tag with no release, fails
   the run. An error can never be mistaken for "absent" (which would lead to a publish
   attempt) or for "mirrored" (which would lead to doing nothing).
+- **The tag is on the commit that ran the checks.** `publish.sh` creates the tag on
+  the commit the run checked out (`--target`), not on whatever `main` points at when
+  `gh` runs. [`scripts/release-target-guard.sh`](scripts/release-target-guard.sh)
+  reads the tag back from GitHub before the release is created (a tag already on
+  another commit is refused) and after (it must be on that commit). A tag on the
+  wrong commit fails the run but is never deleted: the release is immutable, so
+  deleting it would burn the name `sha256-<SHA>` for good.
 - **After publishing**, the same status check runs again, and the public download URL
   is fetched and hashed.
 
@@ -329,6 +336,10 @@ runs on every pull request and every push to `main`:
   and exactly on each bound; commented-out rules; mismatched double downloads; every
   way a mirror entry can be broken; dry runs never publishing; and refusing to
   publish bytes that changed after verification.
+- **Release target guard tests**, [`tests/release-target-guard.test.sh`](tests/release-target-guard.test.sh).
+  Against a throwaway local git remote with lightweight, annotated and nested tags:
+  a tag on the built commit passes, a tag elsewhere fails naming both commits, an
+  absent tag and an unreadable remote give different answers.
 - **A functional test**, [`tests/functional-snort.sh`](tests/functional-snort.sh). It
   runs check 4 against the real Snort in the latest stable firewall image. Good rules
   (the ruleset shipped in that image, and a small hand-written set) must pass. Broken

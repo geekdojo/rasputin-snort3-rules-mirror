@@ -15,7 +15,15 @@
 # says so and exits 0. With DRY_RUN=1 it does everything except create the
 # release, and says exactly what it would have published.
 #
-# Needs: gh with write access to the mirror repo (not for DRY_RUN=1), jq, curl.
+# The tag is created on TARGET_SHA, the commit this run checked out, never on
+# whatever main points at when gh runs. scripts/release-target-guard.sh checks
+# the tag before the release is created (refuse a tag already on another
+# commit) and after (prove where it landed). A tag that lands anywhere else
+# fails the run but is not deleted: releases here are immutable, so deleting
+# one burns the name sha256-<SHA> for good, and that is a person's decision.
+#
+# Needs: gh with write access to the mirror repo (not for DRY_RUN=1), jq, curl,
+# git, and TARGET_SHA (not for DRY_RUN=1).
 
 set -euo pipefail
 
@@ -68,6 +76,23 @@ if [ "$dry_run" = "1" ]; then
 	exit 0
 fi
 
+target="${TARGET_SHA:-}"
+[[ "$target" =~ ^[0-9a-f]{40}$ ]] ||
+	die "TARGET_SHA must be the full commit SHA this run checked out (got '$target'); refusing to publish"
+# Overridable only so tests/unit.sh can stand in for the remote and the guard.
+mirror_remote="${MIRROR_REMOTE:-https://github.com/$MIRROR_REPO.git}"
+guard="${RELEASE_TARGET_GUARD:-$SCRIPT_DIR/release-target-guard.sh}"
+
+# Before publishing: a tag already on another commit would make gh ignore
+# --target. Status 3 (absent) is the normal case; 0 cannot happen after the
+# mirror-status check above (a bare tag fails it) but would be harmless.
+guard_rc=0
+"$guard" "$mirror_remote" "$tag" "$target" || guard_rc=$?
+case "$guard_rc" in
+0 | 3) ;;
+*) die "refusing to publish $tag: release-target-guard status $guard_rc (tag on another commit, or unreadable)" ;;
+esac
+
 run_url=""
 if [ -n "${GITHUB_RUN_ID:-}" ]; then
 	run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-$MIRROR_REPO}/actions/runs/$GITHUB_RUN_ID"
@@ -98,9 +123,15 @@ EOF
 echo "publishing $tag to $MIRROR_REPO"
 gh release create "$tag" "$tarball" \
 	--repo "$MIRROR_REPO" \
+	--target "$target" \
 	--title "$tag" \
 	--notes-file "$notes" ||
 	die "gh release create $tag failed"
+
+guard_rc=0
+"$guard" "$mirror_remote" "$tag" "$target" || guard_rc=$?
+[ "$guard_rc" -eq 0 ] ||
+	die "published $tag but its tag is not on the built commit $target (release-target-guard status $guard_rc). Not deleting it: the release is immutable and deleting it burns the name $tag"
 
 # Prove it from the outside, the way a firewall build will see it.
 status="$("$SCRIPT_DIR/mirror-status.sh" "$sha")" || die "published $tag but it does not verify as intact"

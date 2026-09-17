@@ -112,6 +112,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # The commit this run checked out (verify checked out the same github.sha).
+      # publish.sh creates the tag here, not on whatever main points at when gh
+      # runs, and fails if the tag lands anywhere else.
+      - name: Record built commit
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-tarball
@@ -123,6 +130,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MIRROR_REPO: ${{ github.repository }}
           VERIFIED_SHA: ${{ needs.verify.outputs.sha256 }}
+          TARGET_SHA: ${{ steps.src.outputs.sha }}
         run: |
           # The artifact must describe the SHA the verify job reported.
           [ "$(head -n 1 "$RUNNER_TEMP/work/sha256")" = "$VERIFIED_SHA" ] || {
